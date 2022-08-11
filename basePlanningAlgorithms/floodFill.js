@@ -1,3 +1,5 @@
+const roomDimensions = 50
+
 findPositionsInsideRect = function(rect) {
 
     const positions = []
@@ -7,8 +9,8 @@ findPositionsInsideRect = function(rect) {
 
             // Iterate if the pos doesn't map onto a room
 
-            if (x < 0 || x >= constants.roomDimensions ||
-                y < 0 || y >= constants.roomDimensions) continue
+            if (x < 0 || x >= roomDimensions ||
+                y < 0 || y >= roomDimensions) continue
 
             // Otherwise ass the x and y to positions
 
