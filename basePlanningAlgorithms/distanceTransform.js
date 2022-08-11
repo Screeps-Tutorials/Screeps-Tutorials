@@ -1,3 +1,4 @@
+const roomDimensions = 50
 
 /**
  * This is good for anything that isn't a diagonal, as searches all adjacent tiles when finding distance
@@ -19,8 +20,8 @@ Room.prototype.distanceTransform = function (
     let x
     let y
 
-    for (x = Math.max(x1 - 1, 0); x <= Math.min(x2 + 1, roomDimensions); x += 1) {
-        for (y = Math.max(y1 - 1, 0); y <= Math.min(y2 + 1, roomDimensions); y += 1) {
+    for (x = Math.max(x1 - 1, 0); x < Math.min(x2 + 1, roomDimensions - 1); x += 1) {
+        for (y = Math.max(y1 - 1, 0); y < Math.min(y2 + 1, roomDimensions - 1); y += 1) {
             distanceCM.set(x, y, initialCM.get(x, y) === 255 ? 0 : 255)
         }
     }
