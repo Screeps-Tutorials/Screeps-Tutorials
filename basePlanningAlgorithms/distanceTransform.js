@@ -8,8 +8,8 @@ Room.prototype.distanceTransform = function (
     enableVisuals,
     x1 = 0,
     y1 = 0,
-    x2 = roomDimensions,
-    y2 = roomDimensions,
+    x2 = roomDimensions - 1,
+    y2 = roomDimensions - 1,
 ) {
     const room = this
 
@@ -92,8 +92,8 @@ Room.prototype.diagonalDistanceTransform = function (
     enableVisuals,
     x1 = 0,
     y1 = 0,
-    x2 = roomDimensions,
-    y2 = roomDimensions,
+    x2 = roomDimensions - 1,
+    y2 = roomDimensions - 1,
 ) {
     const room = this
 
