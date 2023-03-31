@@ -1,420 +1,496 @@
-// Usage
-// require('util.min_cut').test('W5N9');
-
 /**
- * Posted 10 may 2018 by @saruss
+ * Created Nov. 2022 by @clarkok
  *
- * Code for calculating the minCut in a room, written by Saruss
- * adapted (for Typescript by Chobobobo , is it somewhere?)
- * some readability added by Chobobobo @typescript was included here
- * (15Aug2019) Updated Game.map.getTerrainAt to Game.map.getRoomTerrain method -Shibdib
+ * Finding the minimum weighted rampart locations for the game Screeps, with the altered Edmonds–Karp algorithm.
+ *
+ * Other implementations typically find the min-cut on the edges between tiles, and then find the tiles around those
+ * edges to form the final result. This is guaranteed to give a cut between safe spots and the exits, but there can be
+ * edge cases where the non-optimal results can be returned.
+ *
+ * This implementation, on the other hand, converts the problem to find the cut on the tiles themselves, so it is
+ * guaranteed to return the optimal result. And during the problem-conversion, there is a opportunity to support the
+ * features to allow tiles have different weights, which is useful to model the construction cost.
+ *
+ * So how do we convert the tile-cut problem to a edge-cut one?
+ *
+ * The idea is for each tile, we split it into a s-node and a d-node, and connect them with an edge whose initial
+ * capacity is the weight of that tile. And for each edge connecting two tiles A and B, we add an edge from A's d-node
+ * to B's s-node, and A's s-node to B's d-node, with initial capacities of both being infinity.
+ *
+ * Then we run the traditional min-cut algorithm on the graph, and the cut will always select the edges connecting
+ * the s-node and d-node of the same tile. After we get the edge-cut solution, we can go find those tiles whose
+ * internal edges are all selected, and those are the tiles we want.
+ *
+ * In the implementation, we are operating on a graph of course, however we don't have a clear node representation.
+ * Instead, we are using a 13-bit integer to represent a node, and using the `capacityMap` below to describe the
+ * connections between nodes.
+ *
+ * The 13-bit integer is composed of 12-bit index and 1-bit flag, where the lower 12 bits encodes the location of the
+ * tile, and the highest bit indicates whether it is a s-node or a d-node. Note that the so-called s-node and d-node
+ * are just names, they are regular nodes in the graph, and makes no difference to the min-cut algorithm itself. We
+ * are differentiating them only because we want to find the cut on the tiles, and not on the edges.
+ *
+ * The capacityMap, on the other hand, records the current capacity of all the edges in the graph. The key of the map
+ * is a 17-bit integer, encoding the source of the edge and the direction. The destination of the edge can be then
+ * calculated. The lower 13-bit of the integer is the source node id as described above, and the highest 4-bit is the
+ * direction. 0-7 are the 8 directions to the 8 surrounding tiles, and 8 is the direction from a s-node to its
+ * corresponding d-node or vice versa.
+ *
+ * The capacity of an edge is the amount of flow that can be pushed through it. The capacity of an edge is always
+ * non-negative. When the capacity of an edge is 0, it means the edge is saturated, and no more flow can be pushed
+ * through it, so the bfs from the sources to the sinks will not traverse it.
+ *
+ * Besides the capacityMap, we also maintain a last[] array during the bfs rounds. The key being a node id, the value
+ * being the last node id on the path from the source to the node, and the direction from the last node to the node.
+ * This is used to trace back the path from the sink to the source, and find the edges on the path. -2 in the array
+ * means the node is not yet visited, and -1 means the node is one of the sources.
+ *
+ * So the overall algorithm is simple:
+ *
+ * Let maxFlow = 0
+ * Repeat:
+ *   Run a bfs in the graph to find a path from the sources to the sinks.
+ *   If non-path can be found, break the loop.
+ *   Otherwise, find the minimum capacity C in the path, and for each edge in the path:
+ *     Reduce the capacity of the edge by C
+ *     Increase the capacity of the reverse edge by C
+ *   maxFlow += C
+ * // Now the maxFlow has been calculated, and the capacityMap altered
+ * Run a tile-based bfs on the costMap from the sources, and find all the tiles where the capacity from s-node to
+ * d-node is 0, and those are the tiles we want.
+ *
+ * We also introduced some optimization to reuse bfs result, especially the last[] array to reduce the work of
+ * each round of bfs. See the comments in the code for details.
  */
 
-const UNWALKABLE = -1;
-const NORMAL = 0;
-const PROTECTED = 1;
-const TO_EXIT = 2;
-const EXIT = 3;
+interface Point {
+    x: number;
+    y: number;
+}
 
+// the eight surrounding points of a tile
+// note the order here is somehow important, the element i and (i + 4) % 8 should be the opposite direction
+const EIGHT_DELTA = [
+    { x: 0, y: -1 }, // TOP
+    { x: 1, y: -1 }, // TOP_RIGHT
+    { x: 1, y: 0 }, // RIGHT
+    { x: 1, y: 1 }, // BOTTOM_RIGHT
+    { x: 0, y: 1 }, // BOTTOM
+    { x: -1, y: 1 }, // BOTTOM_LEFT
+    { x: -1, y: 0 }, // LEFT
+    { x: -1, y: -1 }, // TOP_LEFT
+];
 
 /**
- * An Array with Terrain information: -1 not usable, 2 Sink (Leads to Exit)
+ * pack x-y pairs in 12-bit integers, assuming both x and y in [0, 49]
  */
-function room_2d_array(roomname, bounds = { x1: 0, y1: 0, x2: 49, y2: 49 }) {
-    let room_2d = Array(50).fill(0).map(x => Array(50).fill(UNWALKABLE)); // Array for room tiles
-    let i = bounds.x1;
-    const imax = bounds.x2;
-    let j = bounds.y1;
-    const jmax = bounds.y2;
-    const terrain = Game.map.getRoomTerrain(roomname);
-    for (; i <= imax; i++) {
-        j = bounds.y1;
-        for (; j <= jmax; j++) {
-            if (terrain.get(i, j) !== TERRAIN_MASK_WALL) {
-                room_2d[i][j] = NORMAL; // mark unwalkable
-                if (i === bounds.x1 || j === bounds.y1 || i === bounds.x2 || j === bounds.y2)
-                    room_2d[i][j] = TO_EXIT; // Sink Tiles mark from given bounds
-                if (i === 0 || j === 0 || i === 49 || j === 49)
-                    room_2d[i][j] = EXIT; // Exit Tiles mark
-
-            }
-        }
-    }
-
-    // Marks tiles Near Exits for sink- where you cannot build wall/rampart
-    let y = 1;
-    const max = 49;
-    for (; y < max; y++) {
-        if (room_2d[0][y - 1] === EXIT) room_2d[1][y] = TO_EXIT;
-        if (room_2d[0][y] === EXIT) room_2d[1][y] = TO_EXIT;
-        if (room_2d[0][y + 1] === EXIT) room_2d[1][y] = TO_EXIT;
-        if (room_2d[49][y - 1] === EXIT) room_2d[48][y] = TO_EXIT;
-        if (room_2d[49][y] === EXIT) room_2d[48][y] = TO_EXIT;
-        if (room_2d[49][y + 1] === EXIT) room_2d[48][y] = TO_EXIT;
-    }
-    let x = 1;
-    for (; x < max; x++) {
-        if (room_2d[x - 1][0] === EXIT) room_2d[x][1] = TO_EXIT;
-        if (room_2d[x][0] === EXIT) room_2d[x][1] = TO_EXIT;
-        if (room_2d[x + 1][0] === EXIT) room_2d[x][1] = TO_EXIT;
-        if (room_2d[x - 1][49] === EXIT) room_2d[x][48] = TO_EXIT;
-        if (room_2d[x][49] === EXIT) room_2d[x][48] = TO_EXIT;
-        if (room_2d[x + 1][49] === EXIT) room_2d[x][48] = TO_EXIT;
-    }
-    // mark Border Tiles as not usable
-    y = 1;
-    for (; y < max; y++) {
-        room_2d[0][y] == UNWALKABLE;
-        room_2d[49][y] == UNWALKABLE;
-    }
-    x = 1;
-    for (; x < max; x++) {
-        room_2d[x][0] == UNWALKABLE;
-        room_2d[x][49] == UNWALKABLE;
-    }
-    return room_2d;
+function calcIdx(x: number, y: number) {
+    return (y << 6) | x;
 }
 
-function Graph(menge_v) {
-    this.v = menge_v; // Vertex count
-    this.level = Array(menge_v);
-    this.edges = Array(menge_v).fill(0).map(x => []); // Array: for every vertex an edge Array mit {v,r,c,f} vertex_to,res_edge,capacity,flow
-    this.New_edge = function(u, v, c) { // Adds new edge from u to v
-        this.edges[u].push({ v: v, r: this.edges[v].length, c: c, f: 0 }); // Normal forward Edge
-        this.edges[v].push({ v: u, r: this.edges[u].length - 1, c: 0, f: 0 }); // reverse Edge for Residal Graph
-    };
-    this.Bfs = function(s, t) { // calculates Level Graph and if theres a path from s to t
-        if (t >= this.v)
-            return false;
-        this.level.fill(-1); // reset old levels
-        this.level[s] = 0;
-        let q = []; // queue with s as starting point
-        q.push(s);
-        let u = 0;
-        let edge = null;
-        while (q.length) {
-            u = q.splice(0, 1)[0];
-            let i = 0;
-            const imax = this.edges[u].length;
-            for (; i < imax; i++) {
-                edge = this.edges[u][i];
-                if (this.level[edge.v] < 0 && edge.f < edge.c) {
-                    this.level[edge.v] = this.level[u] + 1;
-                    q.push(edge.v);
-                }
-            }
-        }
-        return this.level[t] >= 0; // return if theres a path to t -> no level, no path!
-    };
-    // DFS like: send flow at along path from s->t recursivly while increasing the level of the visited vertices by one
-    // u vertex, f flow on path, t =Sink , c Array, c[i] saves the count of edges explored from vertex i
-    this.Dfsflow = function(u, f, t, c) {
-        if (u === t) // Sink reached , aboard recursion
-            return f;
-        let edge = null;
-        let flow_till_here = 0;
-        let flow_to_t = 0;
-        while (c[u] < this.edges[u].length) { // Visit all edges of the vertex  one after the other
-            edge = this.edges[u][c[u]];
-            if (this.level[edge.v] === this.level[u] + 1 && edge.f < edge.c) { // Edge leads to Vertex with a level one higher, and has flow left
-                flow_till_here = Math.min(f, edge.c - edge.f);
-                flow_to_t = this.Dfsflow(edge.v, flow_till_here, t, c);
-                if (flow_to_t > 0) {
-                    edge.f += flow_to_t; // Add Flow to current edge
-                    this.edges[edge.v][edge.r].f -= flow_to_t; // subtract from reverse Edge -> Residual Graph neg. Flow to use backward direction of BFS/DFS
-                    return flow_to_t;
-                }
-            }
-            c[u]++;
-        }
-        return 0;
-    };
-    this.Bfsthecut = function(s) { // breadth-first-search which uses the level array to mark the vertices reachable from s
-        let e_in_cut = [];
-        this.level.fill(-1);
-        this.level[s] = 1;
-        let q = [];
-        q.push(s);
-        let u = 0;
-        let edge = null;
-        while (q.length) {
-            u = q.splice(0, 1)[0];
-            let i = 0;
-            const imax = this.edges[u].length;
-            for (; i < imax; i++) {
-                edge = this.edges[u][i];
-                if (edge.f < edge.c) {
-                    if (this.level[edge.v] < 1) {
-                        this.level[edge.v] = 1;
-                        q.push(edge.v);
-                    }
-                }
-                if (edge.f === edge.c && edge.c > 0) { // blocking edge -> could be in min cut
-                    edge.u = u;
-                    e_in_cut.push(edge);
-                }
-            }
-        }
-        let min_cut = [];
-        let i = 0;
-        const imax = e_in_cut.length;
-        for (; i < imax; i++) {
-            if (this.level[e_in_cut[i].v] === -1) // Only edges which are blocking and lead to from s unreachable vertices are in the min cut
-                min_cut.push(e_in_cut[i].u);
-        }
-        return min_cut;
-    };
-    this.Calcmincut = function(s, t) { // calculates min-cut graph (Dinic Algorithm)
-        if (s == t)
-            return -1;
-        let returnvalue = 0;
-        let count = [];
-        let flow = 0;
-        while (this.Bfs(s, t) === true) {
-            count = Array(this.v + 1).fill(0);
-            flow = 0;
-            do {
-                flow = this.Dfsflow(s, Number.MAX_VALUE, t, count);
-                if (flow > 0)
-                    returnvalue += flow;
-            } while (flow)
-        }
-        return returnvalue;
+/**
+ * unpack the 12-bit integer into x-y pair
+ */
+function calcPt(v: number): Point {
+    return { x: v & 0x3f, y: v >> 6 };
+}
+
+function isPointInRoom(p: Point): boolean {
+    return p.x >= 0 && p.x <= 49 && p.y >= 0 && p.y <= 49;
+}
+
+function pointAdd(a: Point, b: Point): Point {
+    return { x: a.x + b.x, y: a.y + b.y };
+}
+
+function surroundingPoints(p: Point): Point[] {
+    return EIGHT_DELTA.map(d => pointAdd(p, d)).filter(isPointInRoom);
+}
+
+class Int32Queue {
+    private q: Int32Array;
+    private h: number;
+    private t: number;
+
+    constructor(capacity: number) {
+        this.q = new Int32Array(capacity);
+        this.h = this.t = 0;
+    }
+
+    reset(arr: number[]) {
+        this.q.set(arr);
+        this.h = 0;
+        this.t = arr.length;
+    }
+
+    push(v: number) {
+        this.q[this.t] = v;
+        this.t = (this.t + 1) % this.q.length;
+    }
+
+    shift(): number {
+        const v = this.q[this.h];
+        this.h = (this.h + 1) % this.q.length;
+        return v;
+    }
+
+    get length(): number {
+        return (this.t - this.h + this.q.length) % this.q.length;
+    }
+
+    clear() {
+        this.t = this.h = 0;
     }
 }
-var util_mincut = {
-    // Function to create Source, Sink, Tiles arrays: takes a rectangle-Array as input for Tiles that are to Protect
-    // rects have top-left/bot_right Coordinates {x1,y1,x2,y2}
-    create_graph: function(roomname, rect, bounds) {
-        let room_array = room_2d_array(roomname, bounds); // An Array with Terrain information: -1 not usable, 2 Sink (Leads to Exit)
-        // For all Rectangles, set edges as source (to protect area) and area as unused
-        let r = null;
-        let j = 0;
-        const jmax = rect.length;
-        // Check bounds
-        if (bounds.x1 >= bounds.x2 || bounds.y1 >= bounds.y2 ||
-            bounds.x1 < 0 || bounds.y1 < 0 || bounds.x2 > 49 || bounds.y2 > 49)
-            return console.log('ERROR: Invalid bounds', JSON.stringify(bounds));
-        for (; j < jmax; j++) {
-            r = rect[j];
-            // Test sizes of rectangles
-            if (r.x1 >= r.x2 || r.y1 >= r.y2) {
-                return console.log('ERROR: Rectangle Nr.', j, JSON.stringify(r), 'invalid.');
-            } else if (r.x1 < bounds.x1 || r.x2 > bounds.x2 || r.y1 < bounds.y1 || r.y2 > bounds.y2) {
-                return console.log('ERROR: Rectangle Nr.', j, JSON.stringify(r), 'out of bounds:', JSON.stringify(bounds));
+
+const MAX_PT = 1 << 12;
+const PT_MASK = MAX_PT - 1;
+
+// the bit to indicate a d-node in the 13-bits node id
+const D_NODE = 1 << 12;
+
+// max encoded node id, there can only be at most 5000 nodes in the graph, some
+// spaces are wasted
+const MAX_NODE = 1 << 13;
+
+// the edge connecting s-node and d-node
+const REV_EDGE = 1 << 16;
+
+// direction shift in the encoded edge
+const DIR_SHIFT = 13;
+
+export function minCutToExit(sources: Point[], costMap: CostMatrix): Point[] {
+    // an array indicating whether a point is at the exit or near the exit
+    const exit = new Uint8Array(MAX_PT);
+    for (let i = 0; i < 49; ++i) {
+        for (const [x, y] of [
+            [i, 0],
+            [49, i],
+            [49 - i, 49],
+            [0, 49 - i],
+        ]) {
+            if (costMap.get(x, y) == 255) {
+                continue;
+            }
+            exit[calcIdx(x, y)] = 1;
+            for (const p of surroundingPoints({ x, y })) {
+                exit[calcIdx(p.x, p.y)] = 1;
+            }
+        }
+    }
+
+    for (const s of sources) {
+        if (exit[calcIdx(s.x, s.y)]) {
+            throw new Error(`Invalid source ${s.x},${s.y}`);
+        }
+    }
+
+    // setup the capacity map, the keys are the encoded edges
+    // 0-12 bits    - source node
+    //   0-11 bits      - the packed location of the source node
+    //   12 bit         - s-node or the d-node
+    // 13-16 bits   - direction of the edge, 0-7 means the edge goes to another
+    // location, while 8 means the edge goes from s-node to d-node or vice versa
+    const capacityMap = new Int32Array(1 << 17);
+    capacityMap.fill(0);
+    for (let y = 0; y < 50; ++y) {
+        for (let x = 0; x < 50; ++x) {
+            if (costMap.get(x, y) == 255) {
+                continue;
             }
 
-            let x = r.x1;
-            const maxx = r.x2 + 1;
-            let y = r.y1;
-            const maxy = r.y2 + 1;
-            for (; x < maxx; x++) {
-                y = r.y1;
-                for (; y < maxy; y++) {
-                    if (x === r.x1 || x === r.x2 || y === r.y1 || y === r.y2) {
-                        if (room_array[x][y] === NORMAL)
-                            room_array[x][y] = PROTECTED;
-                    } else
-                        room_array[x][y] = UNWALKABLE;
+            const idx = calcIdx(x, y);
+
+            // setting up the capacity of the edge from s-node to the d-node at the
+            // location x,y
+            capacityMap[idx | REV_EDGE] = costMap.get(x, y);
+
+            // setting up the capacity of the edges from d-node to s-nodes of the
+            // surrounding locations
+            for (let dir = 0; dir < EIGHT_DELTA.length; ++dir) {
+                const np = pointAdd({ x, y }, EIGHT_DELTA[dir]); // next point
+                if (!isPointInRoom(np)) {
+                    continue;
+                }
+
+                if (costMap.get(np.x, np.y) == 255) {
+                    continue;
+                }
+
+                capacityMap[idx | D_NODE | (dir << DIR_SHIFT)] = 10000; // almost infinite
+            }
+        }
+    }
+
+    // storing the previous node, and the edge direction in the path found from
+    // the sources to the sinks the keys are the encoded nodes the values are
+    //   -2: the node is not visited
+    //   -1: the node is in the sources set
+    //   (direction << 16) | prev_node_id: by which node the current node is
+    //   visited, and the direction of the edge
+    const last = new Int32Array(MAX_NODE);
+    last.fill(-2);
+
+    // whether or not a node is in the bfsQ
+    const added = new Uint8Array(MAX_NODE);
+    added.fill(0);
+
+    // the queue for bfs
+    const bfsQ = new Int32Queue(MAX_NODE);
+
+    for (const p of sources) {
+        const pidx = calcIdx(p.x, p.y);
+        last[pidx] = -1;
+        added[pidx] = 1;
+        bfsQ.push(pidx);
+    }
+
+    // bfs to find a path from the sources to the sinks, returns the sink point or
+    // null if no path is found
+    const bfs = (): Point | null => {
+        while (bfsQ.length) {
+            const opidx = bfsQ.shift(); // original node id
+            added[opidx] = 0;
+
+            if (last[opidx] == -2) {
+                // if the node is no-longer reachable from the sources, skip it
+                // this can happen during the loosen operation below, after we reduce
+                // the capacity of some edges to zero, the descendants of the node may
+                // become unreachable and requires a next bfs round to be re-discovered
+
+                continue;
+            }
+
+            // checking the edge to its counterpart, from s-node to d-node or vice versa
+            if (capacityMap[opidx | REV_EDGE]) {
+                const onpidx = opidx ^ D_NODE; // the counterpart node id
+                if (last[onpidx] == -2) {
+                    last[onpidx] = (8 << 16) | opidx;
+
+                    // note that we don't need to check the `added` flag here, in `bfs`
+                    // we won't add a node to the queue twice
+                    added[onpidx] = 1;
+                    bfsQ.push(onpidx);
                 }
             }
 
+            // checking the edges to the surrounding nodes
+            const pidx = opidx & PT_MASK; // the packed location of the node
+            const p = calcPt(pidx);
+            const npCounterpartFlag = (opidx ^ D_NODE) & D_NODE;
+            for (let dir = 0; dir < EIGHT_DELTA.length; ++dir) {
+                if (capacityMap[opidx | (dir << DIR_SHIFT)] == 0) {
+                    continue;
+                }
+
+                const np = pointAdd(p, EIGHT_DELTA[dir]); // next point
+                const npidx = calcIdx(np.x, np.y);
+
+                // the destination node id, note that the D_NODE flag is different from the opidx node
+                // also note that we don't need to check if the next point is outside the room, this is impossible
+                const onpidx = npidx | npCounterpartFlag;
+
+                if (exit[npidx]) {
+                    // exit! we successfully found a path from the sources to the sinks
+                    // here the last[onpidx] won't be -2, because it is guarenteed that
+                    // it is the first time this node is visited by this round of bfs
+
+                    // we will also leave the rest of nodes in the queue, and continue the bfs in the next iteration
+                    last[onpidx] = (dir << 16) | opidx;
+                    return np;
+                }
+
+                if (last[onpidx] != -2) {
+                    continue;
+                }
+
+                last[onpidx] = (dir << 16) | opidx;
+                added[onpidx] = 1;
+                bfsQ.push(onpidx);
+            }
         }
-        // ********************** Visualisierung
-        if (true) {
-            let visual = new RoomVisual(roomname);
-            let x = 0;
-            let y = 0;
-            const max = 50;
-            for (; x < max; x++) {
-                y = 0;
-                for (; y < max; y++) {
-                    if (room_array[x][y] === UNWALKABLE)
-                        visual.circle(x, y, { radius: 0.5, fill: '#111166', opacity: 0.3 });
-                    else if (room_array[x][y] === NORMAL)
-                        visual.circle(x, y, { radius: 0.5, fill: '#e8e863', opacity: 0.3 });
-                    else if (room_array[x][y] === PROTECTED)
-                        visual.circle(x, y, { radius: 0.5, fill: '#75e863', opacity: 0.3 });
-                    else if (room_array[x][y] === TO_EXIT)
-                        visual.circle(x, y, { radius: 0.5, fill: '#b063e8', opacity: 0.3 });
+
+        return null;
+    };
+
+    // given a node and a dir, return the destination node and the dir to return from source node
+    const revEdge = (opidx: number, dir: number): [number, number] => {
+        if (dir == 8) {
+            return [opidx ^ D_NODE, 8];
+        }
+
+        const pidx = opidx & PT_MASK;
+        const p = calcPt(pidx);
+        const np = pointAdd(p, EIGHT_DELTA[dir]);
+        const onpidx = calcIdx(np.x, np.y) | ((opidx ^ D_NODE) & D_NODE);
+        return [onpidx, (dir + 4) % 8];
+    };
+
+    // a queue for the traversal in the loosen operation, to find nodes whose reachability from the sources changes
+    const looseQ = new Int32Queue(MAX_NODE);
+
+    // a queue for the adding back nodes to the bfsQ in the loosen operation
+    const readdQ = new Int32Queue(MAX_NODE);
+
+    // the loosen operation, called with the sink point found by bfs, would do 3 things
+    //   1. go through the path from the sources to this sink, finding the minimum capacity of the edges in the path,
+    //      substract the minimum capacity from all the edges in the path, and add it to all the reverse edges
+    //   2. using another bfs to find all the nodes whose reachability from the sources changes, with the looseQ, reset
+    //      their last[] to -2, and add them to the readdQ
+    //   3. for each the nodes in the readdQ, add all the source-reachable nodes with a non-zero-capacity edge to this node
+    //      back to the bfsQ, so the next iteration can continue from these nodes
+    const loosen = (p: Point) => {
+        // step 1.a: find the minimum capacity
+        let minCapacity = Infinity;
+        let highestPt = -1; // the closest node in the path to the sources, where the edge from it is one of the minimum capacity edges
+        // we will start from here to find all the nodes whose reachability from the sources changes
+        for (let res = last[calcIdx(p.x, p.y)]; res != -1; ) {
+            const l = res & 0xffff;
+            const d = res >> 16;
+            const capacity = capacityMap[l | (d << DIR_SHIFT)];
+            if (capacity <= minCapacity) {
+                minCapacity = capacity;
+                highestPt = l;
+            }
+            res = last[l];
+        }
+
+        // step 1.b: loosen the edges
+        for (let res = last[calcIdx(p.x, p.y)]; res != -1; ) {
+            const l = res & 0xffff;
+            const d = res >> 16;
+            capacityMap[l | (d << DIR_SHIFT)] -= minCapacity;
+
+            const [rl, rd] = revEdge(l, d);
+            capacityMap[rl | (rd << DIR_SHIFT)] += minCapacity;
+
+            res = last[l];
+        }
+
+        // step 2: find all the nodes whose reachability from the sources changes
+        // we follows the last[] direction instead of the capacityMap[]
+        looseQ.push(highestPt);
+        while (looseQ.length) {
+            const opidx = looseQ.shift();
+
+            // counterpart
+            {
+                const onpidx = opidx ^ D_NODE;
+                if (last[onpidx] == (opidx | (8 << 16))) {
+                    last[onpidx] = -2;
+                    looseQ.push(onpidx);
+                    readdQ.push(onpidx);
+                }
+            }
+
+            const pidx = opidx & PT_MASK;
+            const p = calcPt(pidx);
+            const npCounterpartFlag = (opidx ^ D_NODE) & D_NODE;
+
+            for (let dir = 0; dir < EIGHT_DELTA.length; ++dir) {
+                const np = pointAdd(p, EIGHT_DELTA[dir]);
+                const onpidx = calcIdx(np.x, np.y) | npCounterpartFlag;
+
+                if (last[onpidx] == (opidx | (dir << 16))) {
+                    last[onpidx] = -2;
+                    looseQ.push(onpidx);
+                    readdQ.push(onpidx);
                 }
             }
         }
 
-        // initialise graph
-        // possible 2*50*50 +2 (st) Vertices (Walls etc set to unused later)
-        let g = new Graph(2 * 50 * 50 + 2);
-        let infini = Number.MAX_VALUE;
-        let surr = [
-            [0, -1],
-            [-1, -1],
-            [-1, 0],
-            [-1, 1],
-            [0, 1],
-            [1, 1],
-            [1, 0],
-            [1, -1]
-        ];
-        // per Tile (0 in Array) top + bot with edge of c=1 from top to bott  (use every tile once!)
-        // infini edge from bot to top vertices of adjacent tiles if they not protected (array =1) (no reverse edges in normal graph)
-        // per prot. Tile (1 in array) Edge from source to this tile with infini cap.
-        // per exit Tile (2in array) Edge to sink with infini cap.
-        // source is at  pos 2*50*50, sink at 2*50*50+1 as first tile is 0,0 => pos 0
-        // top vertices <-> x,y : v=y*50+x   and x= v % 50  y=v/50 (math.floor?)
-        // bot vertices <-> top + 2500
-        let source = 2 * 50 * 50;
-        let sink = 2 * 50 * 50 + 1;
-        let top = 0;
-        let bot = 0;
-        let dx = 0;
-        let dy = 0;
-        let x = 1;
-        let y = 1;
-        const max = 49;
-        for (; x < max; x++) {
-            y = 1;
-            for (; y < max; y++) {
-                top = y * 50 + x;
-                bot = top + 2500;
-                if (room_array[x][y] === NORMAL) { // normal Tile
-                    g.New_edge(top, bot, 1);
-                    for (let i = 0; i < 8; i++) {
-                        dx = x + surr[i][0];
-                        dy = y + surr[i][1];
-                        if (room_array[dx][dy] === NORMAL || room_array[dx][dy] === TO_EXIT)
-                            g.New_edge(bot, dy * 50 + dx, infini);
-                    }
-                } else if (room_array[x][y] === PROTECTED) { // protected Tile
-                    g.New_edge(source, top, infini);
-                    g.New_edge(top, bot, 1);
-                    for (let i = 0; i < 8; i++) {
-                        dx = x + surr[i][0];
-                        dy = y + surr[i][1];
-                        if (room_array[dx][dy] === NORMAL || room_array[dx][dy] === TO_EXIT)
-                            g.New_edge(bot, dy * 50 + dx, infini);
-                    }
-                } else if (room_array[x][y] === TO_EXIT) { // near Exit
-                    g.New_edge(top, sink, infini);
-                }
-            }
-        } // graph finished
-        return g;
-    },
-    delete_tiles_to_dead_ends: function(roomname, cut_tiles_array) { // Removes unneccary cut-tiles if bounds are set to include some 	dead ends
-        // Get Terrain and set all cut-tiles as unwalkable
-        let room_array = room_2d_array(roomname);
-        for (let i = cut_tiles_array.length - 1; i >= 0; i--) {
-            room_array[cut_tiles_array[i].x][cut_tiles_array[i].y] = UNWALKABLE;
-        }
-        // Floodfill from exits: save exit tiles in array and do a bfs-like search
-        let unvisited_pos = [];
-        let y = 0;
-        const max = 49;
-        for (; y < max; y++) {
-            if (room_array[1][y] === TO_EXIT) unvisited_pos.push(50 * y + 1)
-            if (room_array[48][y] === TO_EXIT) unvisited_pos.push(50 * y + 48)
-        }
-        let x = 0;
-        for (; x < max; x++) {
-            if (room_array[x][1] === TO_EXIT) unvisited_pos.push(50 + x)
-            if (room_array[x][48] === TO_EXIT) unvisited_pos.push(2400 + x) // 50*48=2400
-        }
-        // Iterate over all unvisited TO_EXIT- Tiles and mark neigbours as TO_EXIT tiles, if walkable (NORMAL), and add to unvisited
-        let surr = [
-            [0, -1],
-            [-1, -1],
-            [-1, 0],
-            [-1, 1],
-            [0, 1],
-            [1, 1],
-            [1, 0],
-            [1, -1]
-        ];
-        let index, dx, dy;
-        while (unvisited_pos.length > 0) {
-            index = unvisited_pos.pop();
-            x = index % 50;
-            y = Math.floor(index / 50);
-            for (let i = 0; i < 8; i++) {
-                dx = x + surr[i][0];
-                dy = y + surr[i][1];
-                if (room_array[dx][dy] === NORMAL) {
-                    unvisited_pos.push(50 * dy + dx);
-                    room_array[dx][dy] = TO_EXIT;
+        // step 3: add those nodes that can goes forward back to bfsQ
+        while (readdQ.length) {
+            const opidx = readdQ.shift();
+            for (let dir = 0; dir < EIGHT_DELTA.length + 1; ++dir) {
+                const [onpidx, rd] = revEdge(opidx, dir);
+                const pidx = onpidx & PT_MASK;
+                if (last[onpidx] != -2 && !exit[pidx] && !added[onpidx] && capacityMap[onpidx | (rd << DIR_SHIFT)]) {
+                    added[onpidx] = 1;
+                    bfsQ.push(onpidx);
                 }
             }
         }
-        // Remove min-Cut-Tile if there is no TO-EXIT  surrounding it
-        let leads_to_exit = false;
-        for (let i = cut_tiles_array.length - 1; i >= 0; i--) {
-            leads_to_exit = false;
-            x = cut_tiles_array[i].x;
-            y = cut_tiles_array[i].y;
-            for (let i = 0; i < 8; i++) {
-                dx = x + surr[i][0];
-                dy = y + surr[i][1];
-                if (room_array[dx][dy] === TO_EXIT) {
-                    leads_to_exit = true;
-                }
-            }
-            if (!leads_to_exit) {
-                cut_tiles_array.splice(i, 1);
-            }
+    };
+
+    // the main loop, loosen the graph until we can't find a path from the sources to the sinks
+    for (let p = bfs(); p != null; p = bfs()) {
+        loosen(p);
+    }
+
+    // collecting the result, we do a bfs from source, and collect points where the edge between s-node and d-node has zero capacity
+    // those points is what we need for the ramparts or walls
+    const ret: Point[] = [];
+    const visited = new Uint8Array(MAX_NODE);
+    const q = sources.map(p => calcIdx(p.x, p.y));
+    for (const p of q) {
+        visited[p] = 1;
+    }
+
+    while (q.length) {
+        const sidx = q.shift()!;
+        const didx = sidx | D_NODE;
+        const p = calcPt(sidx);
+
+        if (last[sidx] != -2 && last[didx] == -2) {
+            ret.push(p);
         }
-    },
-    // Function for user: calculate min cut tiles from room, rect[]
-    GetCutTiles: function(roomname, rect, bounds = { x1: 0, y1: 0, x2: 49, y2: 49 }, verbose = false) {
-        let graph = util_mincut.create_graph(roomname, rect, bounds);
-        let source = 2 * 50 * 50; // Position Source / Sink in Room-Graph
-        let sink = 2 * 50 * 50 + 1;
-        let count = graph.Calcmincut(source, sink);
-        if (verbose) console.log('NUmber of Tiles in Cut:', count);
-        let positions = [];
-        if (count > 0) {
-            let cut_edges = graph.Bfsthecut(source);
-            // Get Positions from Edge
-            let u, x, y;
-            let i = 0;
-            const imax = cut_edges.length;
-            for (; i < imax; i++) {
-                u = cut_edges[i]; // x= v % 50  y=v/50 (math.floor?)
-                x = u % 50;
-                y = Math.floor(u / 50);
-                positions.push({ "x": x, "y": y });
+
+        for (const np of surroundingPoints(p)) {
+            if (!isPointInRoom(np)) {
+                continue;
             }
-        }
-        // if bounds are given,
-        // try to dectect islands of walkable tiles, which are not conntected to the exits, and delete them from the cut-tiles
-        let whole_room = (bounds.x1 == 0 && bounds.y1 == 0 && bounds.x2 == 49 && bounds.y2 == 49);
-        if (positions.length > 0 && !whole_room)
-            util_mincut.delete_tiles_to_dead_ends(roomname, positions);
-        // Visualise Result
-        if (true && positions.length > 0) {
-            let visual = new RoomVisual(roomname);
-            for (let i = positions.length - 1; i >= 0; i--) {
-                visual.circle(positions[i].x, positions[i].y, { radius: 0.5, fill: '#ff7722', opacity: 0.9 });
+
+            if (visited[calcIdx(np.x, np.y)]) {
+                continue;
             }
+
+            if (costMap.get(np.x, np.y) == 255) {
+                continue;
+            }
+
+            const npidx = calcIdx(np.x, np.y);
+            visited[npidx] = 1;
+            q.push(npidx);
         }
-        return positions;
-    },
-    // Example function: demonstrates how to get a min cut with 2 rectangles, which define a "to protect" area
-    test: function(roomname) {
-        //let room=Game.rooms[roomname];
-        //if (!room)
-        //    return 'O noes, no room';
-        let cpu = Game.cpu.getUsed();
-        // Rectangle Array, the Rectangles will be protected by the returned tiles
-        let rect_array = [];
-        rect_array.push({ x1: 20, y1: 6, x2: 28, y2: 27 });
-        rect_array.push({ x1: 29, y1: 13, x2: 34, y2: 16 });
-        // Boundary Array for Maximum Range
-        let bounds = { x1: 0, y1: 0, x2: 49, y2: 49 };
-        // Get Min cut
-        let positions = util_mincut.GetCutTiles(roomname, rect_array, bounds); // Positions is an array where to build walls/ramparts
-        // Test output
-        console.log('Positions returned', positions.length);
-        cpu = Game.cpu.getUsed() - cpu;
-        console.log('Needed', cpu, ' cpu time');
-        return 'Finished';
-    },
+    }
+
+    return ret;
 }
+
+function USAGE() {
+    const assert = require('assert');
+
+    const cm = new PathFinder.CostMatrix();
+    cm._bits.fill(255);
+
+    cm.set(5, 0, 1);
+    for (let y = 1; y < 10; ++y) {
+        for (let x = 1; x < 10; ++x) {
+            cm.set(x, y, 1);
+        }
+    }
+
+    const expected = [
+        { x: 3, y: 1 },
+        { x: 7, y: 1 },
+        { x: 3, y: 2 },
+        { x: 4, y: 2 },
+        { x: 5, y: 2 },
+        { x: 6, y: 2 },
+        { x: 7, y: 2 },
+    ];
+
+    const result = minCutToExit(surroundingPoints({ x: 5, y: 5 }), cm);
+
+    result.sort((a, b) => {
+        if (a.y != b.y) {
+            return a.y - b.y;
+        }
+        return a.x - b.x;
+    });
+    assert.deepStrictEqual(result, expected);
+    console.log('Yes!');
+}
+
+USAGE();
