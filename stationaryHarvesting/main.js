@@ -1,12 +1,31 @@
-// Import creep roles
+// Import creep rolesList
 
 var roleHarvester = require('role.harvester');
 var roleUpgrader = require('role.upgrader');
 const roleHauler = require('role.hauler');
 
+/**
+ * List of all the rolesList our creeps can get in our game
+ * This will help to make the code more readable by changing the spawning system
+ *
+ * 
+ * It's format is 'roleName': minNbRolesInRoom
+ * 
+ * Most important role on the bottom of the list
+ */
+
+const rolesList = {
+    'upgrader': 2,
+    'hauler': 2,
+    'harvester': 2
+}
+
+// Calling all prototypes to have them working
+require('prototype.creep');
+
 // This function runs every tick
 
-module.exports.loop = function() {
+module.exports.loop = function () {
 
     // Loop through each creep's name in Memory.creeps
 
@@ -23,38 +42,27 @@ module.exports.loop = function() {
         }
     }
 
-    // Get counts for creeps of each role
+    // Loop through each role's name in rolesList
+    for (let role in rolesList) {
+        // Get the number of creeps that have this role
+        var nbCreeps = _.sum(Game.creeps, (creep) => creep.memory.role == role)
 
-    var harvesters = _.filter(Game.creeps, (creep) => creep.memory.role == 'harvester');
-    var upgraders = _.filter(Game.creeps, (creep) => creep.memory.role == 'upgrader');
-    var haulers = _.filter(Game.creeps, (creep) => creep.memory.role == 'hauler');
+        // Check if there's enough creeps using this role
+        if (nbCreeps < rolesList[role]) {
+            // You can check the role that's gonna spawn to make different bodies or memories
 
-    // If there aren't enough harvesters
+            if (role == 'hauler') {
+                // Spawning the creep with his body, his unique name changing along his role and his memory
 
-    if (harvesters.length < 2) {
+                Game.spawns['Spawn1'].spawnCreep([CARRY, CARRY, CARRY, MOVE, MOVE, MOVE], role + Game.time, { memory: { role: role, working: false } });
+            } else if (role == 'harvester') {
+                Game.spawns['Spawn1'].spawnCreep([WORK, WORK, MOVE, MOVE], role + Game.time, { memory: { role: role } });
+            } else {
+                // This will be the default creep
 
-        // Spawn a new one
-
-        var newName = 'Harvester' + Game.time;
-        Game.spawns['Spawn1'].spawnCreep([WORK, WORK, MOVE], newName, { memory: { role: 'harvester' } });
-    }
-
-    // Otherwise if there aren't enough haulers
-    else if (haulers.length < 2) {
-
-        // Spawn a new one
-
-        var newName = 'Hauler' + Game.time;
-        Game.spawns['Spawn1'].spawnCreep([CARRY, MOVE, CARRY, MOVE], newName, { memory: { role: 'hauler' } });
-    }
-
-    // Otherwise if there aren't enough upgraders
-    else if (upgraders.length < 2) {
-
-        // Spawn a new one
-
-        var newName = 'Upgrader' + Game.time;
-        Game.spawns['Spawn1'].spawnCreep([WORK, MOVE, CARRY, MOVE], newName, { memory: { role: 'upgrader', upgrading: false } });
+                Game.spawns['Spawn1'].spawnCreep([WORK, CARRY, MOVE], role + Game.time, { memory: { role: role, working: false } });
+            }
+        }
     }
 
     // If the spawn is spawning a creep
@@ -81,34 +89,16 @@ module.exports.loop = function() {
 
         var creep = Game.creeps[creepName]
 
-        // If the creep is a harvester
+        // Check the creep role
+        switch(creep.memory.role) {
+            // If it's an harvester
+            case 'harvester': roleHarvester.run(creep); break;
 
-        if (creep.memory.role == 'harvester') {
+            // If it's an hauler
+            case 'hauler': roleHauler.run(creep); break;
 
-            // Run the creep as one and iterate
-
-            roleHarvester.run(creep);
-            continue
-        }
-
-        // If the creep is an upgrader
-
-        if (creep.memory.role == 'upgrader') {
-
-            // Run the creep as one and iterate
-
-            roleUpgrader.run(creep);
-            continue
-        }
-
-        // If the creep is a hauler
-
-        if (creep.memory.role == 'hauler') {
-
-            // Run the creep as one and iterate
-
-            roleHauler.run(creep);
-            continue
+            // If it's an upgrader
+            case 'upgrader': roleUpgrader.run(creep); break;
         }
     }
 }

@@ -7,24 +7,9 @@ var roleHauler = {
 
         if (creep.store.getFreeCapacity() > 0) {
 
-            // Find energy on the ground
-
-            const droppedEnergy = creep.room.find(FIND_DROPPED_RESOURCES, {
-                filter: resource => resource.resourceType == RESOURCE_ENERGY
-            })
-
-            // Find the closest energy on the ground
-
-            const closestDroppedEnergy = creep.pos.findClosestByRange(droppedEnergy)
-
-            // Try to pickup the energy. If it's not in range
-
-            if (creep.pickup(closestDroppedEnergy) == ERR_NOT_IN_RANGE) {
-
-                // Move to it
-
-                creep.moveTo(closestDroppedEnergy, { visualizePathStyle: { stroke: '#ffaa00' } });
-            }
+            // Now there's just one function to run to pickup energy :) (see prototype.screeps.js file for more)
+            // If you want to add the lines you can edit the prototype.screeps.js file
+            creep.pickupEnergy();
         } else {
 
             // Find spawns in the room

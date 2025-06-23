@@ -143,10 +143,17 @@ Room.prototype.diagonalDistanceTransform = function (
 
         for (x = x1; x <= x2; x += 1) {
             for (y = y1; y <= y2; y += 1) {
-                room.visual.rect(x - 0.5, y - 0.5, 1, 1, {
-                    fill: `hsl(${200}${distanceCM.get(x, y) * 10}, 100%, 60%)`,
-                    opacity: 0.4,
-                })
+
+                // ignore walls and all kinds of obstacle (not showing 0 zones)
+                if (distanceCM.get(x, y) != 0) {
+                    room.visual.rect(x - 0.5, y - 0.5, 1, 1, {
+                        fill: `hsl(${200}${distanceCM.get(x, y) * 10}, 100%, 60%)`,
+                        opacity: 0.4,
+                    })
+
+                    // Display distance from closest wall on the tile on the map
+                    room.text.text(distanceCM.get(x, y).toString(), x, y)
+                }
             }
         }
     }
